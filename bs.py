@@ -2,7 +2,8 @@ import os
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
-import uuid  # Benzersiz dosya isimleri üretmek için
+import uuid
+import copy
 
 def fetch_page(url, headers):
     response = requests.get(url, headers=headers)
@@ -13,6 +14,7 @@ def fetch_page(url, headers):
         return None
 
 def process_images(soup, base_url, images_folder, headers):
+    gallery_images = []  # Galeri için indirilen görsellerin yolunu saklayacağız.
     if not os.path.exists(images_folder):
         os.makedirs(images_folder)
         
@@ -25,7 +27,6 @@ def process_images(soup, base_url, images_folder, headers):
         try:
             img_response = requests.get(absolute_src, headers=headers)
             if img_response.status_code == 200:
-                # URL'den dosya adını al, yoksa benzersiz bir ad üret
                 parsed_url = urlparse(absolute_src)
                 filename = os.path.basename(parsed_url.path)
                 if not filename or '.' not in filename:
@@ -34,15 +35,17 @@ def process_images(soup, base_url, images_folder, headers):
                 with open(local_path, 'wb') as f:
                     f.write(img_response.content)
                 print(f"İndirildi: {absolute_src} -> {local_path}")
+                # Görsel URL'sini galerimiz için kaydediyoruz
+                gallery_images.append(local_path)
                 # img tag'inin src özniteliğini güncelle (görselin yeni yolu)
-                img['src'] = os.path.join(images_folder, filename)
+                img['src'] = local_path
             else:
                 print(f"Resim indirilemedi: {absolute_src} (Status: {img_response.status_code})")
         except Exception as e:
             print(f"Resim indirirken hata oluştu: {absolute_src}\nHata: {str(e)}")
-            
+    return gallery_images
+
 def extract_meta_details(soup):
-    # Tüm meta etiketlerini (hem name hem property) bir sözlükte toplayalım
     meta_details = {}
     for meta in soup.find_all('meta'):
         content = meta.get('content')
@@ -52,8 +55,32 @@ def extract_meta_details(soup):
                 meta_details[key] = content.strip()
     return meta_details
 
-def save_final_html(page_title, meta_details, updated_html, permalink, output_filename="final_page.html"):
-    # Şık bir HTML şablonunda meta bilgiler ve güncellenmiş içeriği yerleştiriyoruz
+def clean_content(soup):
+    """
+    Body içerisinden yalnızca p, a, ul, ol, li etiketlerini korur.
+    Diğer tüm etiketler unwrap edilerek iç metin korunur.
+    Ayrıca, p, a, ul, ol, li etiketlerinin tüm attribute'ları temizlenir.
+    """
+    allowed_tags = ['p', 'a', 'ul', 'ol', 'li']
+    # Derinlemesine kopyasını alarak orijinal üzerinde oynamayalım.
+    content_soup = copy.deepcopy(soup.body)
+    
+    for tag in content_soup.find_all(True):
+        # Eğer izin verilen etiketler dışındaysa, etiketin kendisini kaldırıp, içeriğini koruruz.
+        if tag.name not in allowed_tags:
+            tag.unwrap()
+        else:
+            # İzin verilen etiketlerdeki tüm attribute'ları temizleyelim.
+            tag.attrs = {}
+    return str(content_soup)
+
+def save_final_html(page_title, meta_details, content_html, gallery_images, permalink, output_filename="final_page.html"):
+    # Galeri için listeyi HTML haline getirelim:
+    gallery_html = "<div class='gallery'><h2>Gallery</h2><ul>"
+    for img_path in gallery_images:
+        gallery_html += f"<li><img src='{img_path}' alt='Görsel'></li>\n"
+    gallery_html += "</ul></div>"
+    
     html_output = f"""<!DOCTYPE html>
 <html lang="tr">
 <head>
@@ -74,6 +101,18 @@ def save_final_html(page_title, meta_details, updated_html, permalink, output_fi
         .meta-info h2 {{
             margin-top: 0;
         }}
+        .gallery ul {{
+            list-style-type: none;
+            padding: 0;
+        }}
+        .gallery li {{
+            display: inline-block;
+            margin-right: 10px;
+        }}
+        .gallery img {{
+            max-width: 150px;
+            height: auto;
+        }}
     </style>
 </head>
 <body>
@@ -88,10 +127,13 @@ def save_final_html(page_title, meta_details, updated_html, permalink, output_fi
     </div>
     <div class="page-content">
 """
-    # Güncellenmiş HTML içeriği (örneğin, <body> içeriği) ekleniyor
-    html_output += updated_html
+    html_output += content_html
     html_output += """
     </div>
+    <!-- Galeri -->
+"""
+    html_output += gallery_html
+    html_output += """
 </body>
 </html>
 """
@@ -113,18 +155,16 @@ def main():
     
     soup = BeautifulSoup(html, 'html.parser')
     
-    # Sayfa başlığını al
-    page_title = soup.title.string.strip() if soup.title else "Başlık bulunamadı"
+    # Title: Sayfadaki ilk H1 etiketini kullan (varsa), yoksa <title> etiketine fallback
+    h1_tag = soup.find('h1')
+    if h1_tag:
+        page_title = h1_tag.get_text().strip()
+    else:
+        page_title = soup.title.string.strip() if soup.title else "Başlık bulunamadı"
     
-    # Meta title: önce og:title, sonra meta name="title", yoksa sayfa başlığı
-    meta_title = None
-    if soup.find('meta', attrs={'property': 'og:title'}):
-        meta_title = soup.find('meta', attrs={'property': 'og:title'}).get('content', '').strip()
-    elif soup.find('meta', attrs={'name': 'title'}):
-        meta_title = soup.find('meta', attrs={'name': 'title'}).get('content', '').strip()
-    if not meta_title:
-        meta_title = page_title
-        
+    # Meta bilgileri: Örnek olarak og:title veya meta name="title" tercih edilebilir, fakat artık içerik isteğinize göre H1'den gelen başlık kullanılacak.
+    meta_title = page_title  # İstenirse meta_title olarak H1 kullanılabilir.
+    
     # Meta description
     meta_description = None
     if soup.find('meta', attrs={'name': 'description'}):
@@ -132,24 +172,22 @@ def main():
     else:
         meta_description = "Meta açıklama bulunamadı"
     
-    # Permalink (orijinal URL)
-    permalink = url
+    permalink = url  # Orijinal URL
     
-    # Görselleri indir ve <img> etiketlerindeki src özniteliklerini yerelleştir
+    # Görselleri indir ve güncelle
     images_folder = "images"
-    process_images(soup, url, images_folder, headers)
+    gallery_images = process_images(soup, url, images_folder, headers)
     
     # Tüm meta detaylarını çekelim
     meta_details = extract_meta_details(soup)
-    # Özel olarak meta title ve meta description'ı ekleyelim
     meta_details['meta-title'] = meta_title
     meta_details['meta-description'] = meta_description
     
-    # Güncellenmiş HTML içeriği: Genellikle body etiketini kullanıyoruz
-    updated_html = str(soup.body) if soup.body else str(soup)
+    # İçerik: Body içerisinden yalnızca p, a, ul, ol, li etiketlerini koruyarak temiz içerik elde ediyoruz.
+    cleaned_content = clean_content(soup)
     
-    # Tüm verileri şık bir HTML dosyası olarak kaydedelim
-    save_final_html(page_title, meta_details, updated_html, permalink)
+    # Final HTML dosyasını kaydet
+    save_final_html(page_title, meta_details, cleaned_content, gallery_images, permalink)
 
 if __name__ == "__main__":
     main()
