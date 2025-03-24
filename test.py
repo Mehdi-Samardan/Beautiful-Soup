@@ -11,12 +11,6 @@ COOKIES = {
     # "cookie_name": "cookie_value"  # Çerez kullanmıyorsan bunu boş bırak
 }
 
-# 🌟 Proxy kullanmıyorsan burayı tamamen kaldır
-# PROXIES = {
-#     "http": "http://your_proxy:port",
-#     "https": "https://your_proxy:port"
-# }
-
 # 🌟 Web sayfasını kazıyan fonksiyon
 def scrape_and_save(url, filename):
     session = requests.Session()
