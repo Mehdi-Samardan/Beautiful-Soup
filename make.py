@@ -65,8 +65,8 @@ def clean_content(soup):
     for unwanted in soup(['script', 'style']):
         unwanted.decompose()
     
+    # Only allow basic HTML tags: p, a, ul, ol, li (images are excluded from content)
     allowed_tags = ["p", "a", "ul", "ol", "li"]
-    # We'll remove <img> tags entirely from content (per your requirement).
     content_soup = copy.deepcopy(soup.body or soup)
     
     for tag in content_soup.find_all(True):
@@ -79,10 +79,8 @@ def clean_content(soup):
     return content_str
 
 def zip_images(images_folder):
-    # Create a zip archive from the images folder
-    zip_name = images_folder  # Use the folder name as base
-    shutil.make_archive(zip_name, 'zip', images_folder)
-    zip_path = f"{zip_name}.zip"
+    shutil.make_archive(images_folder, 'zip', images_folder)
+    zip_path = f"{images_folder}.zip"
     return zip_path
 
 def process_url(url, headers):
@@ -101,26 +99,53 @@ def process_url(url, headers):
     meta_title, meta_description = extract_meta(soup, page_title)
     permalink = url
     
-    # Process images: download and update image src in HTML
+    # Process images: download images and update <img> tag src attribute
     images_folder = get_image_folder(url)
     soup = process_images(soup, url, headers, images_folder)
     
-    # Clean content: only allow basic HTML tags: p, a, ul, ol, li
+    # Clean content: keep only basic HTML tags (p, a, ul, ol, li)
     content = clean_content(soup)
     
-    # Do not include the zip data in the JSON payload; send it separately.
+    # Create ZIP archive for the images folder
+    zip_file_path = zip_images(images_folder)
+    
     return {
         "page_title": page_title,
         "meta_title": meta_title,
         "meta_description": meta_description,
         "permalink": permalink,
         "content": content,
-        "images_folder": images_folder  # We'll use this to attach the zip file separately.
+        "zip_file_path": zip_file_path  # For attachment purposes.
     }
 
+def send_bundle(bundle, webhook_url):
+    # Extract the ZIP file path and remove it from the JSON payload
+    zip_file_path = bundle.pop("zip_file_path")
+    # Prepare a multipart payload where each property is a separate field
+    multipart_data = {
+        "page_title": (None, bundle.get("page_title"), "text/plain"),
+        "meta_title": (None, bundle.get("meta_title"), "text/plain"),
+        "meta_description": (None, bundle.get("meta_description"), "text/plain"),
+        "permalink": (None, bundle.get("permalink"), "text/plain"),
+        "content": (None, bundle.get("content"), "text/plain")
+    }
+    # Open the ZIP file for attachment
+    with open(zip_file_path, "rb") as f_zip:
+        multipart_data["zip_file"] = (os.path.basename(zip_file_path), f_zip, "application/zip")
+        try:
+            response = requests.post(webhook_url, files=multipart_data, timeout=30)
+            print("🔔 Webhook Response status code:", response.status_code)
+            print("🔔 Webhook Response text:", response.text)
+            if response.status_code in [200, 201, 202]:
+                print("✅ Bundle successfully sent to the webhook.")
+            else:
+                print(f"❌ Error sending bundle: {response.status_code}")
+        except Exception as e:
+            print("❌ Error during webhook request:", e)
+
 def main():
-    # Process only one URL
-    url = "https://www.ellindecoratie.nl/boomstam-bijzettafeltje"
+    # Process only the "over-mij" website
+    url = "https://www.ellindecoratie.nl/over-mij"
     webhook_url = "https://hook.eu2.make.com/is1dhkyhge8iuqg4jsxykh6dkyaejawy"
     
     headers = {
@@ -130,53 +155,31 @@ def main():
     }
     
     print(f"🔗 Processing URL: {url}")
-    data = process_url(url, headers)
-    if not data:
+    bundle_data = process_url(url, headers)
+    if not bundle_data:
         print("❌ No data processed.")
         return
     
-    # Remove images_folder from JSON payload
-    images_folder = data.pop("images_folder")
-    
-    # Write JSON payload (without the zip data) to output.json (optional backup)
+    # (Optional) Save JSON payload without ZIP file path for backup
     output_file = "output.json"
     try:
+        backup_data = {k: v for k, v in bundle_data.items() if k != "zip_file_path"}
         with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
+            json.dump(backup_data, f, ensure_ascii=False, indent=4)
         print(f"✅ Data successfully written to {output_file}.")
     except Exception as e:
-        print("❌ Error writing to file:", str(e))
+        print("❌ Error writing to file:", e)
     
-    # Create the zip archive for the images folder
-    zip_file_path = zip_images(images_folder)
-    
-    # Send a multipart/form-data POST request with two parts:
-    # 1. "data": the JSON payload (output.json content)
-    # 2. "zip_file": the zip file of images
-    try:
-        with open(output_file, "r", encoding="utf-8") as f_json, open(zip_file_path, "rb") as f_zip:
-            multipart_data = {
-                "data": (output_file, f_json, "application/json"),
-                "zip_file": (os.path.basename(zip_file_path), f_zip, "application/zip")
-            }
-            response = requests.post(webhook_url, files=multipart_data, timeout=30)
-        print("🔔 Webhook Response status code:", response.status_code)
-        print("🔔 Webhook Response text:", response.text)
-        if response.status_code in [200, 201, 202]:
-            print("✅ Payload and zip file successfully sent to the webhook.")
-        else:
-            print(f"❌ Error sending payload: {response.status_code}")
-    except Exception as e:
-        print("❌ Error during webhook request:", str(e))
+    # Send all properties along with the ZIP file in one bundle
+    send_bundle(bundle_data, webhook_url)
     
     # Debug output
     print("------------------------------------------------")
-    print("Page Title:", data["page_title"])
-    print("Meta-title:", data["meta_title"])
-    print("Meta-description:", data["meta_description"])
-    print("Permalink:", data["permalink"])
-    print("Content (first 300 characters):", data["content"][:300])
-    print("Zip file path:", zip_file_path)
+    for key, value in bundle_data.items():
+        if key != "zip_file_path":
+            preview = value[:300] if isinstance(value, str) else value
+            print(f"{key}: {preview}")
+    print("ZIP File path:", bundle_data.get("zip_file_path"))
     print("------------------------------------------------")
 
 if __name__ == "__main__":
