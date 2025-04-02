@@ -122,7 +122,7 @@ def send_all_properties(bundle, webhook_url):
         send_property_with_zip(key, value, zip_file_path, webhook_url)
 
 def main():
-    url = "https://www.ellindecoratie.nl/over-mij"
+    url = "https://www.ellindecoratie.nl"
     webhook_url = "https://hook.eu2.make.com/is1dhkyhge8iuqg4jsxykh6dkyaejawy"
     headers = {
         "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
